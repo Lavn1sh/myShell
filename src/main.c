@@ -2,7 +2,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/time.h>
 #include <sys/wait.h>
+#include <signal.h>
 #include "history.h"
 #include "pipeline.h"
 #include "utils.h"
@@ -10,12 +12,20 @@
 #define MAX_COMMAND_LENGTH 1024
 #define MAX_ARGS 64
 
+History history = { .start = 0, .end = 0, .count = 0 }; // made gloabal to be handled by signal handler
+
+void sigint_handler(int sig) {
+    display_exec_details(&history);
+    exit(0);
+}
+
 int main() {
     char input[MAX_COMMAND_LENGTH];
     char *args[MAX_ARGS];
     pid_t pid;
     int status;
-    History history = { .start = 0, .end = 0, .count = 0 };
+    
+    signal(SIGINT, sigint_handler);
 
     while (1) {
         // Print the prompt
@@ -31,8 +41,10 @@ int main() {
         // Remove the newline character from the input
         input[strcspn(input, "\n")] = 0;
 
-        // Add the command to history
-        add_to_history(&history, input);
+        // Make a copy of the input command
+        char cmd_copy[MAX_COMMAND_LENGTH];
+        strncpy(cmd_copy, input, MAX_COMMAND_LENGTH - 1);
+        cmd_copy[MAX_COMMAND_LENGTH - 1] = '\0';
 
         // Check if the command is 'history'
         if (strcmp(input, "history") == 0) {
@@ -58,6 +70,7 @@ int main() {
 
         if (num_commands > 1) {
             execute_pipeline(commands, num_commands, background);
+            add_to_history(&history, cmd_copy, getpid(), time(NULL), 0);
         } else {
             // Parse the command into arguments
             parse_command(input, args);
@@ -67,6 +80,10 @@ int main() {
                 continue;
             }
 
+            struct timeval start, end;
+            gettimeofday(&start, NULL);
+            time_t start_time = time(NULL);
+
             // Fork and execute the command
             pid = fork();
             if (pid == 0) {
@@ -74,7 +91,7 @@ int main() {
                 if (execvp(args[0], args) == -1) {
                     perror("execvp failed");
                 }
-                exit(EXIT_FAILURE);
+                exit(1);
             } else if (pid < 0) {
                 // Forking error
                 perror("fork failed");
@@ -82,8 +99,13 @@ int main() {
                 // Parent process
                 if (!background) {
                     waitpid(pid, &status, 0);
+                    // record end time , calc duration and add to history
+                    gettimeofday(&end, NULL);
+                    double duration = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1e6;
+                    add_to_history(&history, input, pid, start_time, duration);
                 } else {
                     printf("Process running in background with PID %d\n", pid);
+                    add_to_history(&history, cmd_copy, pid, start_time, 0);
                 }
             }
         }
