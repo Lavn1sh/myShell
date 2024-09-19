@@ -2,7 +2,7 @@
 #define HISTORY_H
 
 #define MAX_COMMAND_LENGTH 1024
-#define MAX_HISTORY 10
+#define MAX_HISTORY 100
 
 typedef struct {
     char commands[MAX_HISTORY][MAX_COMMAND_LENGTH];

@@ -13,7 +13,7 @@ void execute_pipeline(char *commands[], int num_commands, int background) {
     for (int i = 0; i < num_commands - 1; i++) {
         if (pipe(pipefds + i * 2) == -1) {
             perror("pipe failed");
-            exit(EXIT_FAILURE);
+            exit(1);
         }
     }
 
@@ -23,13 +23,13 @@ void execute_pipeline(char *commands[], int num_commands, int background) {
             if (i > 0) {
                 if (dup2(pipefds[(i - 1) * 2], 0) == -1) {
                     perror("dup2 failed");
-                    exit(EXIT_FAILURE);
+                    exit(1);
                 }
             }
             if (i < num_commands - 1) {
                 if (dup2(pipefds[i * 2 + 1], 1) == -1) {
                     perror("dup2 failed");
-                    exit(EXIT_FAILURE);
+                    exit(1);
                 }
             }
             for (int j = 0; j < 2 * (num_commands - 1); j++) {
@@ -38,7 +38,7 @@ void execute_pipeline(char *commands[], int num_commands, int background) {
             execute_command(commands[i]);
         } else if (pid < 0) {
             perror("fork failed");
-            exit(EXIT_FAILURE);
+            exit(1);
         }
     }
 
