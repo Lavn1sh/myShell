@@ -125,6 +125,13 @@ int main() {
             continue;
         }
 
+        // Check for background process indicator '&'
+        int background = 0;
+        if (input[strlen(input) - 1] == '&') {
+            background = 1;
+            input[strlen(input) - 1] = '\0'; // Remove '&' from command
+        }
+
         // Split the command by pipes
         char *commands[MAX_ARGS];
         int num_commands = 0;
@@ -158,9 +165,11 @@ int main() {
                 perror("fork failed");
             } else {
                 // Parent process
-                do {
-                    waitpid(pid, &status, WUNTRACED);
-                } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+                if (!background) {
+                    waitpid(pid, &status, 0);
+                } else {
+                    printf("Process running in background with PID %d\n", pid);
+                }
             }
         }
     }
