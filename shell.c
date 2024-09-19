@@ -1,50 +1,99 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/wait.h>
 
 #define MAX_COMMAND_LENGTH 1024
 #define MAX_ARGS 64
-#define HIST_SIZE 100
+#define MAX_HISTORY 10
 
 typedef struct {
-    char *commands[HIST_SIZE];
+    char commands[MAX_HISTORY][MAX_COMMAND_LENGTH];
     int start;
     int end;
     int count;
 } History;
 
-void init_history(History *history) {
-    history->start = 0;
-    history->end = 0;
-    history->count = 0;
-}
-
-void add_to_history(History *history, const char *cmd) {
-    if (history->count == HIST_SIZE) {
-        free(history->commands[history->start]);
-        history->start = (history->start + 1) % HIST_SIZE;
-    }
-    history->commands[history->end] = strdup(cmd);
-    history->end = (history->end + 1) % HIST_SIZE;
-    history->count++;
-}
-
-void print_history(History *history) {
-    int i;
-    for (i = 0; i < history->count; i++) {
-        printf("%d: %s\n", i + 1, history->commands[(history->start + i) % HIST_SIZE]);
+void add_to_history(History *history, const char *command) {
+    strncpy(history->commands[history->end], command, MAX_COMMAND_LENGTH);
+    history->end = (history->end + 1) % MAX_HISTORY;
+    if (history->count < MAX_HISTORY) {
+        history->count++;
+    } else {
+        history->start = (history->start + 1) % MAX_HISTORY;
     }
 }
 
-// Function to parse the input into arguments
+void print_history(const History *history) {
+    int index = history->start;
+    for (int i = 0; i < history->count; i++) {
+        printf("%d: %s\n", i + 1, history->commands[index]);
+        index = (index + 1) % MAX_HISTORY;
+    }
+}
+
 void parse_command(char *input, char **args) {
     int i = 0;
-    args[i] = strtok(input, " \n");  // Split the input by space and newline
+    args[i] = strtok(input, " ");
     while (args[i] != NULL) {
         i++;
-        args[i] = strtok(NULL, " \n");
+        args[i] = strtok(NULL, " ");
+    }
+}
+
+void execute_command(char *command) {
+    char *args[MAX_ARGS];
+    parse_command(command, args);
+    if (execvp(args[0], args) == -1) {
+        perror("execvp failed");
+        exit(EXIT_FAILURE);
+    }
+}
+
+void execute_pipeline(char *commands[], int num_commands) {
+    int pipefds[2 * (num_commands - 1)];
+    pid_t pid;
+    int status;
+
+    for (int i = 0; i < num_commands - 1; i++) {
+        if (pipe(pipefds + i * 2) == -1) {
+            perror("pipe failed");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    for (int i = 0; i < num_commands; i++) {
+        pid = fork();
+        if (pid == 0) {
+            if (i > 0) {
+                if (dup2(pipefds[(i - 1) * 2], 0) == -1) {
+                    perror("dup2 failed");
+                    exit(EXIT_FAILURE);
+                }
+            }
+            if (i < num_commands - 1) {
+                if (dup2(pipefds[i * 2 + 1], 1) == -1) {
+                    perror("dup2 failed");
+                    exit(EXIT_FAILURE);
+                }
+            }
+            for (int j = 0; j < 2 * (num_commands - 1); j++) {
+                close(pipefds[j]);
+            }
+            execute_command(commands[i]);
+        } else if (pid < 0) {
+            perror("fork failed");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    for (int i = 0; i < 2 * (num_commands - 1); i++) {
+        close(pipefds[i]);
+    }
+
+    for (int i = 0; i < num_commands; i++) {
+        wait(&status);
     }
 }
 
@@ -70,35 +119,49 @@ int main() {
         // Add the command to history
         add_to_history(&history, input);
 
-        // Parse the command into arguments
-        parse_command(input, args);
-
         // Check if the command is 'history'
-        if (strcmp(args[0], "history") == 0) {
+        if (strcmp(input, "history") == 0) {
             print_history(&history);
             continue;
         }
 
-        // If the input is empty, continue
-        if (args[0] == NULL) {
-            continue;
+        // Split the command by pipes
+        char *commands[MAX_ARGS];
+        int num_commands = 0;
+        commands[num_commands] = strtok(input, "|");
+        while (commands[num_commands] != NULL) {
+            num_commands++;
+            commands[num_commands] = strtok(NULL, "|");
         }
 
-        // Fork a child process
-        pid = fork();
-
-        if (pid < 0) {
-            perror("Fork failed");
-            exit(1);
-        } else if (pid == 0) {
-            // Child process: Execute the command
-            if (execvp(args[0], args) == -1) {
-                perror("Execution failed");
-            }
-            exit(1);
+        if (num_commands > 1) {
+            execute_pipeline(commands, num_commands);
         } else {
-            // Parent process: Wait for the child process to complete
-            waitpid(pid, &status, 0);
+            // Parse the command into arguments
+            parse_command(input, args);
+
+            // If the input is empty, continue
+            if (args[0] == NULL) {
+                continue;
+            }
+
+            // Fork and execute the command
+            pid = fork();
+            if (pid == 0) {
+                // Child process
+                if (execvp(args[0], args) == -1) {
+                    perror("execvp failed");
+                }
+                exit(EXIT_FAILURE);
+            } else if (pid < 0) {
+                // Forking error
+                perror("fork failed");
+            } else {
+                // Parent process
+                do {
+                    waitpid(pid, &status, WUNTRACED);
+                } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+            }
         }
     }
 
