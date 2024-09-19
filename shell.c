@@ -51,7 +51,7 @@ void execute_command(char *command) {
     }
 }
 
-void execute_pipeline(char *commands[], int num_commands) {
+void execute_pipeline(char *commands[], int num_commands, int background) {
     int pipefds[2 * (num_commands - 1)];
     pid_t pid;
     int status;
@@ -92,8 +92,12 @@ void execute_pipeline(char *commands[], int num_commands) {
         close(pipefds[i]);
     }
 
-    for (int i = 0; i < num_commands; i++) {
-        wait(&status);
+    if (!background) {
+        for (int i = 0; i < num_commands; i++) {
+            wait(&status);
+        }
+    } else {
+        printf("Pipeline running in background with PID %d\n", pid);
     }
 }
 
@@ -142,7 +146,7 @@ int main() {
         }
 
         if (num_commands > 1) {
-            execute_pipeline(commands, num_commands);
+            execute_pipeline(commands, num_commands, background);
         } else {
             // Parse the command into arguments
             parse_command(input, args);
