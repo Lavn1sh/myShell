@@ -1,3 +1,18 @@
-hello.c
-hello
-.gitignore
+# Build artifacts
+bin/
+*.o
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Debug
+*.dSYM/
+core
+
+# OS files
+.DS_Store
+Thumbs.db

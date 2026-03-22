@@ -1,41 +1,68 @@
-#include <stdio.h>
-#include <time.h>
-#include <string.h>
-#include <sys/types.h>
+/*
+ * lpsh - History
+ *
+ * Uses GNU Readline's history API for persistent command history
+ * stored in ~/.lpsh_history. Supports history expansion (!! !n !string).
+ */
+
 #include "history.h"
+#include "shell.h"
 
-void add_to_history(History *history, const char *command, pid_t pid, time_t start_time, double duration) {
-    strncpy(history->commands[history->end].command, command, MAX_COMMAND_LENGTH - 1);
-    history->commands[history->end].command[MAX_COMMAND_LENGTH - 1] = '\0'; // Ensure null-termination
-    history->commands[history->end].pid = pid;
-    history->commands[history->end].start_time = start_time;
-    history->commands[history->end].duration = duration;
-    history->end = (history->end + 1) % MAX_HISTORY;
-    if (history->count < MAX_HISTORY) {
-        history->count++;
-    } else {
-        history->start = (history->start + 1) % MAX_HISTORY;
-    }
+#include <stdio.h>
+#include <readline/history.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+/* get history file path */
+
+static const char *history_path(void)
+{
+    static char path[MAX_LINE];
+    const char *home = getenv("HOME");
+    if (!home) home = "/tmp";
+    snprintf(path, sizeof(path), "%s/%s", home, HISTORY_FILE);
+    return path;
 }
 
-void print_history(const History *history) {
-    int index = history->start;
-    for (int i = 0; i < history->count; i++) {
-        printf("%d: %s\n", i + 1, history->commands[index].command);
-        index = (index + 1) % MAX_HISTORY;
-    }
+/* load */
+
+void history_load(void)
+{
+    using_history();
+    stifle_history(1000);
+    read_history(history_path());
 }
 
-void display_exec_details(const History *history) {
-    printf("\nExecution Details:\n");
-    int index = history->start;
-    for (int i = 0; i < history->count; i++) {
-        char *start_time_string = ctime(&history->commands[index].start_time);
-        start_time_string[strlen(start_time_string) - 1] = '\0'; // Remove newline character
-        printf("Command: %s\n", history->commands[index].command);
-        printf("PID: %d\n", history->commands[index].pid);
-        printf("Start Time: %s\n", start_time_string);
-        printf("Duration: %.2f seconds\n\n", history->commands[index].duration);
-        index = (index + 1) % MAX_HISTORY;
+/* save */
+
+void history_save(void)
+{
+    write_history(history_path());
+}
+
+/* expand !! !n !string */
+
+char *history_expand_line(const char *line)
+{
+    /* Quick check: does line contain ! at all? */
+    if (!strchr(line, '!'))
+        return lpsh_strdup(line);
+
+    char *expansion = NULL;
+    int result = history_expand((char *)line, &expansion);
+
+    if (result == -1) {
+        /* error */
+        fprintf(stderr, "lpsh: %s\n", expansion);
+        free(expansion);
+        return NULL;
     }
+    if (result == 1) {
+        /* expansion happened, print it */
+        printf("%s\n", expansion);
+    }
+    /* result == 0: no expansion, or result == 2: display only */
+
+    return expansion;
 }
