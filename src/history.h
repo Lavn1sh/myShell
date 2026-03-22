@@ -1,27 +1,17 @@
+/*
+ * lpsh - History (readline-backed)
+ */
+
 #ifndef HISTORY_H
 #define HISTORY_H
 
-#include <time.h>
+/* Load history from ~/.lpsh_history */
+void history_load(void);
 
-#define MAX_COMMAND_LENGTH 1024
-#define MAX_HISTORY 100
+/* Save history to ~/.lpsh_history */
+void history_save(void);
 
-typedef struct {
-    char command[MAX_COMMAND_LENGTH];
-    pid_t pid;
-    time_t start_time;
-    double duration;
-} CommandDetails;
+/* Perform history expansion on a line. Returns new malloc'd string. */
+char *history_expand_line(const char *line);
 
-typedef struct {
-    CommandDetails commands[MAX_HISTORY];
-    int start;
-    int end;
-    int count;
-} History;
-
-void add_to_history(History *history, const char *command, pid_t pid, time_t start_time, double duration);
-void print_history(const History *history);
-void display_exec_details(const History *history);
-
-#endif
+#endif /* HISTORY_H */

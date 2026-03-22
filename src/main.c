@@ -1,115 +1,204 @@
+/*
+ * lpsh - A Unix Shell
+ *
+ * Entry point: REPL loop, signal setup, initialization.
+ */
+
+#include "alias.h"
+#include "executor.h"
+#include "expand.h"
+#include "history.h"
+#include "jobs.h"
+#include "lexer.h"
+#include "parser.h"
+#include "prompt.h"
+#include "rc.h"
+#include "shell.h"
+
+#include <signal.h>
 #include <stdio.h>
+#include <readline/history.h>
+#include <readline/readline.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/time.h>
-#include <sys/wait.h>
-#include <signal.h>
-#include "history.h"
-#include "pipeline.h"
-#include "utils.h"
 
-#define MAX_COMMAND_LENGTH 1024
-#define MAX_ARGS 64
+/* global shell state */
 
-History history = { .start = 0, .end = 0, .count = 0 }; // made gloabal to be handled by signal handler
+ShellState shell;
 
-void sigint_handler(int sig) {
-    display_exec_details(&history);
-    exit(0);
+/* lpsh_strdup (safe strdup) */
+
+char *lpsh_strdup(const char *s)
+{
+    if (!s) return NULL;
+    char *dup = strdup(s);
+    if (!dup) {
+        perror("lpsh: strdup");
+        exit(1);
+    }
+    return dup;
 }
 
-int main() {
-    char input[MAX_COMMAND_LENGTH];
-    char *args[MAX_ARGS];
-    pid_t pid;
-    int status;
-    
-    signal(SIGINT, sigint_handler);
+/* signal handlers */
 
-    while (1) {
-        // Print the prompt
-        printf("$ ");
-        fflush(stdout); // Ensure the prompt is printed immediately
+static void sigint_handler(int sig)
+{
+    (void)sig;
+    /* Just print a new prompt on Ctrl-C */
+    printf("\n");
+    rl_on_new_line();
+    rl_replace_line("", 0);
+    rl_redisplay();
+}
 
-        // Read the command from standard input
-        if (fgets(input, sizeof(input), stdin) == NULL) {
-            perror("fgets failed");
-            continue;
-        }
+static void sigtstp_handler(int sig)
+{
+    (void)sig;
+    /* Ignore SIGTSTP in the shell itself - only forward to children */
+}
 
-        // Remove the newline character from the input
-        input[strcspn(input, "\n")] = 0;
+static void sigchld_handler(int sig)
+{
+    (void)sig;
+    /* Reap background jobs */
+    jobs_check_status();
+}
 
-        // Make a copy of the input command
-        char cmd_copy[MAX_COMMAND_LENGTH];
-        strncpy(cmd_copy, input, MAX_COMMAND_LENGTH - 1);
-        cmd_copy[MAX_COMMAND_LENGTH - 1] = '\0';
+static void setup_signals(void)
+{
+    struct sigaction sa;
 
-        // Check if the command is 'history'
-        if (strcmp(input, "history") == 0) {
-            print_history(&history);
-            continue;
-        }
+    /* SIGINT */
+    sa.sa_handler = sigint_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGINT, &sa, NULL);
 
-        // Check for background process indicator '&'
-        int background = 0;
-        if (input[strlen(input) - 1] == '&') {
-            background = 1;
-            input[strlen(input) - 1] = '\0'; // Remove '&' from command
-        }
+    /* SIGTSTP */
+    sa.sa_handler = sigtstp_handler;
+    sigaction(SIGTSTP, &sa, NULL);
 
-        // Split the command by pipes
-        char *commands[MAX_ARGS];
-        int num_commands = 0;
-        commands[num_commands] = strtok(input, "|");
-        while (commands[num_commands] != NULL) {
-            num_commands++;
-            commands[num_commands] = strtok(NULL, "|");
-        }
+    /* SIGCHLD */
+    sa.sa_handler = sigchld_handler;
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigaction(SIGCHLD, &sa, NULL);
 
-        if (num_commands > 1) {
-            execute_pipeline(commands, num_commands, background);
-            add_to_history(&history, cmd_copy, getpid(), time(NULL), 0);
-        } else {
-            // Parse the command into arguments
-            parse_command(input, args);
+    /* Ignore SIGTTOU so tcsetpgrp doesn't stop us */
+    signal(SIGTTIN, SIG_IGN);
+    signal(SIGTTOU, SIG_IGN);
+}
 
-            // If the input is empty, continue
-            if (args[0] == NULL) {
-                continue;
-            }
+/* tab completion generator */
 
-            struct timeval start, end;
-            gettimeofday(&start, NULL);
-            time_t start_time = time(NULL);
+static char *command_generator(const char *text, int state)
+{
+    /* Use default readline filename completion */
+    return rl_filename_completion_function(text, state);
+}
 
-            // Fork and execute the command
-            pid = fork();
-            if (pid == 0) {
-                // Child process
-                if (execvp(args[0], args) == -1) {
-                    perror("execvp failed");
-                }
-                exit(1);
-            } else if (pid < 0) {
-                // Forking error
-                perror("fork failed");
-            } else {
-                // Parent process
-                if (!background) {
-                    waitpid(pid, &status, 0);
-                    // record end time , calc duration and add to history
-                    gettimeofday(&end, NULL);
-                    double duration = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1e6;
-                    add_to_history(&history, input, pid, start_time, duration);
-                } else {
-                    printf("Process running in background with PID %d\n", pid);
-                    add_to_history(&history, cmd_copy, pid, start_time, 0);
-                }
-            }
-        }
+static char **command_completion(const char *text, int start, int end)
+{
+    (void)end;
+    (void)start;
+    rl_attempted_completion_over = 0;
+    return rl_completion_matches(text, command_generator);
+}
+
+/* initialization */
+
+static void shell_init(void)
+{
+    memset(&shell, 0, sizeof(shell));
+    shell.shell_pid   = getpid();
+    shell.interactive = isatty(STDIN_FILENO);
+    shell.running     = 1;
+    shell.next_job_id = 1;
+
+    if (shell.interactive) {
+        /* Put ourselves in our own process group */
+        setpgid(0, 0);
+        tcsetpgrp(STDIN_FILENO, getpgrp());
+        tcgetattr(STDIN_FILENO, &shell.orig_termios);
     }
 
-    return 0;
+    setup_signals();
+
+    /* readline setup */
+    rl_attempted_completion_function = command_completion;
+
+    /* load history */
+    history_load();
+
+    /* load rc file */
+    rc_load_default();
+}
+
+static void shell_cleanup(void)
+{
+    history_save();
+    if (shell.interactive)
+        tcsetattr(STDIN_FILENO, TCSADRAIN, &shell.orig_termios);
+}
+
+/* main REPL */
+
+int main(void)
+{
+    shell_init();
+
+    while (shell.running) {
+        /* check for finished background jobs */
+        jobs_check_status();
+
+        /* get prompt and read input */
+        const char *ps1 = shell.interactive ? prompt_build() : "";
+        char *line = readline(ps1);
+
+        if (!line) {
+            /* EOF (Ctrl-D) */
+            if (shell.interactive) printf("\n");
+            break;
+        }
+
+        /* skip empty lines */
+        if (line[0] == '\0') {
+            free(line);
+            continue;
+        }
+
+        /* history expansion (!! !n !string) */
+        char *expanded_line = history_expand_line(line);
+        free(line);
+        if (!expanded_line)
+            continue;
+
+        /* add to history */
+        add_history(expanded_line);
+
+        /* alias expansion */
+        char *aliased = alias_expand(expanded_line);
+        free(expanded_line);
+
+        /* lex */
+        TokenList tl = lexer_tokenize(aliased);
+        free(aliased);
+
+        /* parse */
+        CommandList cl;
+        if (parser_parse(&tl, &cl) < 0) {
+            token_list_free(&tl);
+            continue;
+        }
+
+        /* execute */
+        shell.last_status = executor_run(&cl);
+
+        /* cleanup */
+        command_list_free(&cl);
+        token_list_free(&tl);
+    }
+
+    shell_cleanup();
+    return shell.last_status;
 }
